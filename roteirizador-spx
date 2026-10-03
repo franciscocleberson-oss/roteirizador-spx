@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roteirizador SPX - Rotas Reais</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    body { display: flex; flex-direction: column; height: 100vh; background: #f8fafc; }
+    header { background: #ee4d2d; color: white; padding: 14px 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    header h1 { font-size: 1.2rem; font-weight: 700; }
+    header p { font-size: 0.85rem; opacity: 0.9; }
+    
+    .input-bar { background: white; padding: 16px; border-bottom: 1px solid #e2e8f0; display: flex; gap: 10px; flex-wrap: wrap; }
+    .input-bar input { flex: 1; min-width: 280px; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.9rem; }
+    .btn { background: #ee4d2d; color: white; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    .btn:hover { background: #d73211; }
+    .btn-waze { background: #33ccff; color: #000; font-weight: bold; text-decoration: none; padding: 6px 10px; border-radius: 4px; font-size: 0.75rem; display: inline-block; }
+
+    .main-container { display: flex; flex: 1; overflow: hidden; }
+    #sidebar { width: 420px; background: white; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column; }
+    .metrics { display: flex; justify-content: space-around; background: #f1f5f9; padding: 12px; border-bottom: 1px solid #e2e8f0; font-size: 0.85rem; }
+    .metrics div { text-align: center; }
+    .metrics strong { display: block; font-size: 1.1rem; color: #0f172a; }
+    
+    .stops-list { flex: 1; overflow-y: auto; padding: 12px; }
+    .stop-card { background: white; border: 1px solid #e2e8f0; border-left: 5px solid #ee4d2d; border-radius: 8px; padding: 12px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .stop-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .stop-num { background: #ee4d2d; color: white; font-weight: bold; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem; }
+    .stop-address { font-weight: 600; color: #1e293b; font-size: 0.9rem; margin-bottom: 4px; }
+    .stop-info { font-size: 0.8rem; color: #64748b; margin-bottom: 8px; }
+    .package-tag { background: #fef3c7; color: #92400e; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; display: inline-block; margin-top: 4px; }
+
+    #map { flex: 1; height: 100%; }
+    @media (max-width: 768px) {
+      .main-container { flex-direction: column-reverse; }
+      #sidebar { width: 100%; height: 50%; }
+      #map { height: 50%; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>📦 Roteirizador Livre SPX (Shopee Express)</h1>
+    <p>Gere paradas reais por endereço/coordenada sem agrupamentos errados</p>
+  </header>
+
+  <div class="input-bar">
+    <input type="text" id="sheet-url" placeholder="Cole o Link do Google Sheets (Aba Endereçamento ou Romaneio)..." />
+    <button class="btn" onclick="carregarPlanilha()">🚀 Importar & Otimizar Rota</button>
+  </div>
+
+  <div class="main-container">
+    <div id="sidebar">
+      <div class="metrics">
+        <div>Total Pacotes<strong id="total-pacotes">0</strong></div>
+        <div>Paradas Reais<strong id="total-paradas">0</strong></div>
+        <div>Distância Estimada<strong id="dist-total">0 km</strong></div>
+      </div>
+      <div class="stops-list" id="stops-list">
+        <p style="text-align: center; color: #94a3b8; margin-top: 20px;">Cole o link do Google Sheets acima para gerar o itinerário.</p>
+      </div>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let map = L.map('map').setView([-10.9696, -37.1162], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: 'OpenStreetMap' }).addTo(map);
+    let markers = [];
+    let polyline = null;
+
+    // Função para tratar as coordenadas defeituosas da SPX
+    function parseCoord(val) {
+      if (!val) return 0;
+      let s = val.toString().trim().replace(/[^0-9.-]/g, '');
+      if (s.split('.').length > 2) {
+        let parts = s.split('.');
+        s = parts[0] + '.' + parts.slice(1).join('');
+      }
+      let num = parseFloat(s);
+      if (Math.abs(num) > 180) {
+        num = num / 1000000;
+      }
+      return num;
+    }
+
+    function haversine(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    async function carregarPlanilha() {
+      const urlInput = document.getElementById('sheet-url').value.trim();
+      if (!urlInput) {
+        alert("Cole o link da sua planilha do Google Sheets.");
+        return;
+      }
+
+      // Extrai ID e GID do link do Google Sheets
+      const matchId = urlInput.match(/\/d\/([a-zA-Z0-9-_]+)/);
+      const matchGid = urlInput.match(/gid=([0-9]+)/);
+
+      if (!matchId) {
+        alert("Link do Google Sheets inválido.");
+        return;
+      }
+
+      const docId = matchId[1];
+      const gid = matchGid ? matchGid[1] : '0';
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${docId}/gviz/tq?tqx=out:csv&gid=${gid}`;
+
+      try {
+        const response = await fetch(csvUrl);
+        const csvText = await response.text();
+        processarCSV(csvText);
+      } catch (err) {
+        alert("Erro ao ler planilha. Certifique-se de que a planilha está configurada como 'Qualquer pessoa com o link pode ver'.");
+      }
+    }
+
+    function processarCSV(csvText) {
+      const lines = csvText.split('\n').filter(l => l.trim() !== '');
+      if (lines.length < 2) return;
+
+      const rows = lines.map(line => {
+        return line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(cell => cell.replace(/^"\vert{}"$/g, '').trim());
+      });
+
+      const headers = rows[0].map(h => h.toLowerCase());
+      
+      // Mapeamento automático de colunas
+      const idxTN = headers.findIndex(h => h.includes('spx') || h.includes('tn'));
+      const idxAddr = headers.findIndex(h => h.includes('address') || h.includes('endereço') || h.includes('destination'));
+      const idxCity = headers.findIndex(h => h.includes('city') || h.includes('cidade'));
+      const idxNeigh = headers.findIndex(h => h.includes('neighborhood') || h.includes('bairro'));
+      const idxLat = headers.findIndex(h => h.includes('lat'));
+      const idxLon = headers.findIndex(h => h.includes('lon'));
+
+      let pacotes = [];
+      for (let i = 1; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r[idxTN]) continue;
+
+        let lat = parseCoord(r[idxLat]);
+        let lon = parseCoord(r[idxLon]);
+
+        pacotes.push({
+          tn: r[idxTN],
+          endereco: r[idxAddr] || 'Endereço não informado',
+          cidade: r[idxCity] || '',
+          bairro: r[idxNeigh] || '',
+          lat: lat,
+          lon: lon
+        });
+      }
+
+      // AGRUPAMENTO REAL: Agrupa pacotes que têm a MESMA coordenada ou MESMO endereço
+      let paradasMap = new Map();
+      pacotes.forEach(p => {
+        let key = `${p.lat.toFixed(5)}_${p.lon.toFixed(5)}`;
+        if (!paradasMap.has(key)) {
+          paradasMap.set(key, {
+            lat: p.lat,
+            lon: p.lon,
+            endereco: p.endereco,
+            bairro: p.bairro,
+            cidade: p.cidade,
+            pacotes: []
+          });
+        }
+        paradasMap.get(key).pacotes.push(p.tn);
+      });
+
+      let paradas = Array.from(paradasMap.values());
+
+      // OTIMIZAÇÃO DE ROTA (Vizinho Mais Próximo - TSP)
+      let naoVisitados = [...paradas];
+      let rotaOtimizada = [naoVisitados.shift()];
+
+      while (naoVisitados.length > 0) {
+        let atual = rotaOtimizada[rotaOtimizada.length - 1];
+        let proxIdx = 0;
+        let menorDist = Infinity;
+
+        naoVisitados.forEach((p, i) => {
+          let d = haversine(atual.lat, atual.lon, p.lat, p.lon);
+          if (d < menorDist) {
+            menorDist = d;
+            proxIdx = i;
+          }
+        });
+
+        rotaOtimizada.push(naoVisitados.splice(proxIdx, 1)[0]);
+      }
+
+      renderizarResultado(pacotes.length, rotaOtimizada);
+    }
+
+    function renderizarResultado(totalPacotes, paradas) {
+      markers.forEach(m => map.removeLayer(m));
+      markers = [];
+      if (polyline) map.removeLayer(polyline);
+
+      const listEl = document.getElementById('stops-list');
+      listEl.innerHTML = '';
+
+      let coords = [];
+      let distTotal = 0;
+
+      paradas.forEach((p, idx) => {
+        coords.push([p.lat, p.lon]);
+        if (idx > 0) {
+          distTotal += haversine(paradas[idx-1].lat, paradas[idx-1].lon, p.lat, p.lon);
+        }
+
+        // Criar marcador no mapa
+        const marker = L.marker([p.lat, p.lon])
+          .bindPopup(`<b>${idx+1}ª Parada</b><br>${p.endereco}<br><b>${p.pacotes.length} Pacote(s)</b>`)
+          .addTo(map);
+        markers.push(marker);
+
+        // Link para o Waze
+        const wazeUrl = `https://waze.com/ul?ll=${p.lat},${p.lon}&navigate=yes`;
+
+        // Card da lista
+        const card = document.createElement('div');
+        card.className = 'stop-card';
+        card.innerHTML = `
+          <div class="stop-header">
+            <span class="stop-num">${idx + 1}ª Parada</span>
+            <a href="${wazeUrl}" target="_blank" class="btn-waze">📍 Waze</a>
+          </div>
+          <div class="stop-address">${p.endereco}</div>
+          <div class="stop-info">${p.bairro} - ${p.cidade}</div>
+          <div>${p.pacotes.map(tn => `<span class="package-tag">📦 ${tn}</span>`).join(' ')}</div>
+        `;
+        card.onclick = () => {
+          map.setView([p.lat, p.lon], 17);
+          marker.openPopup();
+        };
+        listEl.appendChild(card);
+      });
+
+      // Linha de rota
+      polyline = L.polyline(coords, { color: '#ee4d2d', weight: 4, opacity: 0.8 }).addTo(map);
+      if (coords.length > 0) map.fitBounds(polyline.getBounds());
+
+      document.getElementById('total-pacotes').innerText = totalPacotes;
+      document.getElementById('total-paradas').innerText = paradas.length;
+      document.getElementById('dist-total').innerText = distTotal.toFixed(1) + ' km';
+    }
+  </script>
+</body>
+</html>
